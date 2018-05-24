@@ -1,0 +1,222 @@
+---
+title: "Assignment 4 - Applying meta-analytic priors"
+author: "Riccardo Fusaroli"
+date: "3/16/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment 4
+
+In this assignment we do the following:
+- we reproduce the meta-analysis of pitch SD from last semester in a Bayesian framework
+- we reproduce the pitch SD in schizophrenia analysis from last semester using both a conservative and a meta-analytic prior
+- we assess the difference in model quality and estimates using the two priors.
+
+The questions you need to answer are: What are the consequences of using a meta-analytic prior? Evaluate the models with conservative and meta-analytic priors. Discuss the effects on estimates. Discuss the effects on model quality. Discuss the role that meta-analytic priors should have in scientific practice. Should we systematically use them? Do they have drawbacks? Should we use them to complement more conservative approaches? How does the use of meta-analytic priors you suggest reflect the skeptical and cumulative nature of science?
+
+### Step by step suggestions
+
+Step 1: Reproduce the meta-analysis of pitch sd from previous studies of voice in schizophrenia
+- the data is available as Assignment4MetaData.xlsx
+- Effect size (cohen's d), sd and variance are already calculated (you're welcome!)
+- Since we're only interested in getting a meta-analytic effect size, let's take a shortcut and use bromance magic (brms): https://mvuorre.github.io/post/2016/2016-09-29-bayesian-meta-analysis/
+
+```{r meta_analysis}
+library(readxl)
+meta_data=read_excel("Assignment4MetaData.xlsx")
+pitch_data=read_excel("Assignment4PitchDatav2.xlsx")
+library(brms)
+library(metafor)
+library(lme4)
+
+parallel::detectCores() # 4
+library(dplyr)
+meta=select(meta_data, StudyRef, MeanES, VarianceES, SdES)
+meta=na.omit(meta)
+
+m <- brm(MeanES | se(SdES) ~ 1 + (1|StudyRef), data=meta, cores=2, chain=2, iter=2000)
+m
+
+library(brmstools)
+forest(m,
+       show_data = TRUE,
+       av_name = "Effect size")
+```
+
+Step 2: Prepare the pitch SD data from last year
+- the data is available as Assignment4PitchData.csv (thanks Celine)
+- We do not know how to build random effects, yet. So we need to simplify the dataset to avoid interdependence between datapoint: How?
+- Also, let's standardize the data, so that they are compatible with our meta-analytic prior (Cohen's d is measured in SDs).
+
+```{r pitch sd prepare}
+library(dplyr)
+pitch = readxl::read_excel("Assignment4PitchDatav2.xlsx")
+
+pitch_sum = pitch %>% 
+  group_by(ID_unique) %>%
+  mutate(SD=mean(PitchSD)) %>%
+  select(1:3,5,13)
+
+pitch_ready=pitch_sum[!duplicated(pitch_sum),]
+pitch_ready$SD_s = (pitch_ready$SD-mean(pitch_ready$SD))/sd(pitch_ready$SD)
+pitch_ready=as.data.frame(pitch_ready)
+```
+
+Step 3: Build a regression model predicting Pitch SD from Diagnosis.
+- how is the outcome distributed? (likelihood function)
+- how are the parameters of the likelihood distribution distributed? Which predictors should they be conditioned on?
+- use a skeptical/conservative prior for the effects of diagnosis. Remember you'll need to motivate it.
+- Describe and plot the estimates. Evaluate model quality
+
+```{r skeptical model}
+qqnorm(pitch_ready$SD_s)
+# not normally distributed
+
+library(rethinking)
+model_skep <- map2stan(
+  alist(
+    SD_s ~ dnorm( mu , sigma ) ,
+    mu <- a + bD*diagnosis,
+    a ~ dnorm(0,1),
+    bD ~ dnorm(0,.2),
+    sigma ~ dcauchy(0,2)
+  ) ,
+  data=pitch_ready )
+
+precis(model_skep)
+```
+
+
+```{r}
+model_more <- map2stan(model_skep, chains = 4, cores = 2, iter = 1000)
+precis(model_more)
+plot(model_more)
+
+model_skep_more <- map2stan(model_skep, chains = 2, cores = 2, iter = 20000)
+precis(model_skep_more)
+plot(model_skep_more)
+
+post <- extract.samples( model_skep_more )
+pairs(model_skep_more)
+show(model_skep_more)
+```
+
+
+```{r ppc for skeptical}
+
+library(rethinking)
+samples_all = extract.samples( model_skep_more , n=1e4 )
+prediction <- sim( model_skep_more , data=pitch_ready, n= 1e4, post=samples_all )
+
+library(bayesplot)
+ppc_dens_overlay(pitch_ready$SD_s, prediction[1:150, ])
+```
+
+Step 4: Now re-run the model with the meta-analytic prior
+- Describe and plot the estimates. Evaluate model quality
+ # What are the consequencies of using meta-analytic priors? Drawbacks? Is it okay to replace conservative priors with meta analytic ones?
+
+```{r meta model}
+
+model_meta <- map2stan(
+  alist(
+    SD_s ~ dnorm( mu , sigma ) ,
+    mu <- a + bD*diagnosis,
+    a ~ dnorm(0,1),
+    bD ~ dnorm(-0.53,0.23),
+    sigma ~ dcauchy(0,2)
+  ) ,
+  data=pitch_ready )
+
+precis(model_meta)
+
+model_mm <- map2stan( model_meta , chains=4 , cores=2, iter = 1000 )
+precis(model_mm)
+plot(model_mm)
+
+# for reporting
+model_meta_more <- map2stan(model_meta , chains=2 , cores=2, iter = 20000)
+precis(model_meta_more)
+plot(model_meta_more)
+
+post <- extract.samples( model_meta_more, n=1e4)
+pairs(model_meta_more)
+show(model_meta_more)
+```
+
+```{r ppc plot}
+library(rethinking)
+samples_all = extract.samples( model_meta_more , n=1e4 )
+prediction <- sim( model_meta_more , data=pitch_ready, n= 1e4, post=samples_all )
+
+library(bayesplot)
+ppc_dens_overlay(pitch_ready$SD_s, prediction[1:150, ])
+```
+
+Step 5: Compare the models
+- Plot priors and posteriors of the diagnosis effect in both models
+- Compare posteriors between the two models
+- Compare their relative distance from truth (WAIC)
+- Discuss how they compare and whether any of them is best.
+
+```{r plots, plots, plots}
+#priors against the posteriors for the skeptical
+posterior = extract.samples(model_skep_more , n=1e4)
+dist_skep= data.frame(skep_post= posterior$bD, prior= rnorm(1e4, 0 , 0.2)) 
+
+ggplot(data= dist_skep)+ 
+  geom_line(aes(skep_post), stat= "density") +
+  geom_line(aes(prior), stat= "density", colour= "red")+
+  labs(x="data", y="density")
+
+#priors against the posteriors for the meta
+posterior = extract.samples( model_meta_more , n=1e4 )
+dist_meta= data.frame(meta_post= posterior$bD, prior= rnorm(1e4, -0.53, 0.23))
+
+ggplot(data= dist_meta)+ 
+  geom_line(aes(meta_post), stat= "density") +
+  geom_line(aes(prior), stat= "density", colour= "red")+
+  labs(x="data", y="density")
+
+#two posteriors
+post_skep_meta= data.frame(skep=dist_skep$skep_post, meta=dist_meta$meta_post)
+ggplot(data= post_skep_meta)+ 
+  geom_line(aes(skep), stat= "density") +
+  geom_line(aes(meta), stat= "density", colour= "red")+
+  labs(x="data", y="density")
+
+#WAIC
+compare(model_skep_more, model_meta_more)
+```
+
+Step 6: Prepare a nice write up of the analysis and answer the questions at the top.
+
+Optional step 7: how skeptical should a prior be?
+- Try different levels of skepticism and compare them using WAIC.
+
+Optional step 8: Include other predictors
+- Do age, gender and education improve the model?
+- Should they be main effects or interactions?
+
+Optional step 9: Bromance magic.
+- explore the bromance code below including random effects (by default with weakly informative priors)
+- learn how to change the prior
+- explore effects of trial, age, gender, including the appropriate random slopes
+- compare the models you created using WAIC and posterior predictive check (pp_check())
+
+
+```{r}
+
+brm_out <- brm(PitchSD ~ 1 + Diagnosis  +(1|ID_unique/Study), # Outcome as a function of the predictors as in lme4. 
+               data=Data, # Define the data
+               family=gaussian(), # Define the family. 
+               iter = 5000, warmup = 2000, cores = 4)
+summary(brm_out1)
+plot(brm_out1)
+
+```
+
